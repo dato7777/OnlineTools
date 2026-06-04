@@ -1,0 +1,42 @@
+@import url("https://fonts.googleapis.com/css2?family=Noto+Sans+Hebrew:wght@400;500;600&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --surface: #fafafa;
+  --surface-elevated: #ffffff;
+  --accent: #0d9488;
+  --accent-muted: #ccfbf1;
+  --text: #18181b;
+  --text-muted: #71717a;
+  --border: #e4e4e7;
+}
+
+.dark {
+  --surface: #09090b;
+  --surface-elevated: #18181b;
+  --accent: #2dd4bf;
+  --accent-muted: #134e4a;
+  --text: #fafafa;
+  --text-muted: #a1a1aa;
+  --border: #27272a;
+}
+
+html {
+  color: var(--text);
+  background: var(--surface);
+}
+
+body {
+  min-height: 100dvh;
+}
+
+@layer utilities {
+  .glass {
+    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--surface-elevated) 85%, transparent);
+    backdrop-filter: blur(12px);
+  }
+}

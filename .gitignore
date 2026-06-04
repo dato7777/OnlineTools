@@ -1,0 +1,14 @@
+node_modules/
+.next/
+storage/
+backend/storage/
+.env
+.env.local
+__pycache__/
+*.pyc
+.venv/
+dist/
+*.egg-info/
+.DS_Store
+backend/onlinetools.db
+*.db
