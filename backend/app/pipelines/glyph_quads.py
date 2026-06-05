@@ -155,13 +155,23 @@ def resolve_glyph_ownership(blocks: list[dict[str, Any]]) -> None:
         block["glyphRects"] = owned
 
 
+def _glyph_ref_bbox(block: dict[str, Any]) -> list[float]:
+    ink = block.get("textInkBbox")
+    if ink and len(ink) >= 4:
+        return list(ink)
+    return list(block.get("originalBbox") or block.get("bbox") or [])
+
+
 def stamp_glyph_rects(page: fitz.Page, block: dict[str, Any]) -> None:
-    bbox = block.get("originalBbox") or block.get("bbox") or []
+    bbox = _glyph_ref_bbox(block)
     if len(bbox) < 4:
         return
+    table_cell = bool(block.get("tableGroupId"))
     content = block.get("content") or block.get("originalContent") or ""
     rects = harvest_glyph_rects(page, bbox, content)
-    rects = _sanitize_glyph_rects(_filter_rects_for_block(rects, bbox), bbox)
+    rects = _sanitize_glyph_rects(
+        _filter_rects_for_block(rects, bbox), bbox, table_cell=table_cell
+    )
     if rects:
         block["glyphRects"] = _rect_to_list(rects)
 
@@ -177,15 +187,22 @@ def _normalize_char_rect(rect: fitz.Rect, max_height: float = 13.5) -> fitz.Rect
 
 
 def _sanitize_glyph_rects(
-    rects: list[fitz.Rect], ref_bbox: list[float]
+    rects: list[fitz.Rect],
+    ref_bbox: list[float],
+    *,
+    table_cell: bool = False,
 ) -> list[fitz.Rect]:
     """Drop merged/search hit boxes — they white-out table rules on redact."""
     if len(ref_bbox) < 4:
         return rects
     bw = ref_bbox[2] - ref_bbox[0]
     bh = ref_bbox[3] - ref_bbox[1]
-    max_w = max(14.0, bw * 0.38)
-    max_area = max(320.0, bw * bh * 0.14)
+    if table_cell:
+        max_w = max(12.0, bw * 0.22)
+        max_area = max(180.0, bw * bh * 0.08)
+    else:
+        max_w = max(14.0, bw * 0.38)
+        max_area = max(320.0, bw * bh * 0.14)
     out: list[fitz.Rect] = []
     for rect in rects:
         tight = _normalize_char_rect(rect)
@@ -248,7 +265,7 @@ def harvest_owned_glyph_rects(
     page_blocks: list[dict[str, Any]],
 ) -> list[fitz.Rect]:
     """Per-character boxes owned by this block only (safe for redaction)."""
-    ref_bbox = list(block.get("originalBbox") or block.get("bbox") or [])
+    ref_bbox = _glyph_ref_bbox(block)
     if len(ref_bbox) < 4:
         return []
     block_id = block.get("id")
@@ -274,10 +291,11 @@ def harvest_owned_glyph_rects(
     if not rects and content:
         rects = harvest_glyph_rects(page, ref_bbox, content)
         rects = _filter_rects_for_block(rects, ref_bbox)
-    if content:
+    table_cell = bool(block.get("tableGroupId"))
+    if content and not table_cell:
         for r in harvest_search_glyph_rects(page, ref_bbox, content):
             rects.append(r)
-    return _sanitize_glyph_rects(rects, ref_bbox)
+    return _sanitize_glyph_rects(rects, ref_bbox, table_cell=table_cell)
 
 
 def glyph_rects_for_block(
@@ -290,15 +308,17 @@ def glyph_rects_for_block(
         if owned:
             return owned
 
-    ref_bbox = list(block.get("originalBbox") or block.get("bbox") or [])
+    ref_bbox = _glyph_ref_bbox(block)
     stored = block.get("glyphRects")
 
+    table_cell = bool(block.get("tableGroupId"))
     if stored and ref_bbox:
         rects = _sanitize_glyph_rects(
             _filter_rects_for_block(
                 [fitz.Rect(*r) for r in stored if r and len(r) >= 4], ref_bbox
             ),
             ref_bbox,
+            table_cell=table_cell,
         )
         if rects:
             return rects
@@ -307,7 +327,11 @@ def glyph_rects_for_block(
         content = block.get("originalContent") or block.get("content") or ""
         rects = harvest_glyph_rects(page, ref_bbox, content)
         if rects:
-            return _sanitize_glyph_rects(_filter_rects_for_block(rects, ref_bbox), ref_bbox)
+            return _sanitize_glyph_rects(
+                _filter_rects_for_block(rects, ref_bbox),
+                ref_bbox,
+                table_cell=table_cell,
+            )
 
     return []
 

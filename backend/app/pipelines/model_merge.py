@@ -33,6 +33,12 @@ def merge_pages_with_originals(
                 merged.setdefault("pdfFont", prev.get("pdfFont"))
                 merged.setdefault("glyphRects", prev.get("glyphRects"))
                 merged.setdefault("textOrigin", prev.get("textOrigin"))
+                merged.setdefault("tableGroupId", prev.get("tableGroupId"))
+                merged.setdefault("tableRow", prev.get("tableRow"))
+                merged.setdefault("tableCol", prev.get("tableCol"))
+                merged.setdefault("cellBbox", prev.get("cellBbox"))
+                merged.setdefault("textInkBbox", prev.get("textInkBbox"))
+                merged.setdefault("originalTextInkBbox", prev.get("originalTextInkBbox"))
             elif merged.get("type") == "background":
                 merged.setdefault("originalBbox", prev.get("originalBbox", merged.get("bbox", [])))
                 merged.setdefault("backgroundRgb", prev.get("backgroundRgb"))

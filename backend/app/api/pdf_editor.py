@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models import Artifact, FileAsset, Job, JobStatus
 from app.pipelines.accuracy import export_pdf_from_model, model_has_changes, save_block_document
+from app.pipelines.placement import compute_placement_metrics
 from app.pipelines.editor_preview import render_page_without_text
 from app.pipelines.model_merge import merge_pages_with_originals
 from app.schemas import ModelPatchRequest
@@ -126,6 +127,16 @@ def patch_model(
     db.add(Artifact(job_id=job.id, kind="block_model", storage_key=key, meta={"saved": True}))
     db.commit()
     return model
+
+
+class PlacementMetricsRequest(BaseModel):
+    block: dict
+
+
+@router.post("/placement-metrics")
+def post_placement_metrics(body: PlacementMetricsRequest) -> dict:
+    """Server-computed insert rect and font size — same math as PDF export."""
+    return compute_placement_metrics(body.block)
 
 
 class ExportRequest(BaseModel):

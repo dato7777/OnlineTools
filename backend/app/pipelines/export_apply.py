@@ -28,6 +28,15 @@ from app.pipelines.glyph_quads import (
     resolve_glyph_ownership,
     stamp_glyph_rects,
 )
+from app.pipelines.placement import (
+    bbox_moved,
+    export_display_text,
+    is_table_cell,
+    largest_table_font_size,
+    placement_bbox,
+    placement_origin,
+    table_insert_rect,
+)
 from app.storage import file_path, read_file, save_bytes
 
 logger = logging.getLogger(__name__)
@@ -39,12 +48,11 @@ _ALIGN = {
 }
 
 
-def _placement_bbox(block: dict[str, Any]) -> list[float]:
-    """Match the editor box exactly (where the user placed/resized the block)."""
-    cur = block.get("bbox")
-    if cur and len(cur) >= 4:
-        return list(cur)
-    return list(block.get("originalBbox") or [])
+def _placement_point(
+    block: dict[str, Any], bbox_override: list[float] | None = None
+) -> fitz.Point:
+    pt = placement_origin(block, bbox_override)
+    return fitz.Point(pt[0], pt[1])
 
 
 def _digit_only_placement_bbox(
@@ -85,6 +93,8 @@ def _clip_insert_rect(
     rect: fitz.Rect, block: dict[str, Any], page_blocks: list[dict[str, Any]]
 ) -> fitz.Rect:
     """Only nudge insert away from unmodified blocks stacked above/below — not table columns."""
+    if is_table_cell(block):
+        return rect
     for other in page_blocks:
         if other.get("type") != "text":
             continue
@@ -108,33 +118,185 @@ def _reference_bbox(block: dict[str, Any]) -> list[float]:
     ref = block.get("originalBbox")
     if ref and len(ref) >= 4:
         return list(ref)
-    return _placement_bbox(block)
+    return placement_bbox(block)
 
 
-def _bbox_moved(block: dict[str, Any]) -> bool:
-    orig = block.get("originalBbox")
-    cur = block.get("bbox", [])
-    if not orig or len(orig) != len(cur):
+def _ink_bbox(block: dict[str, Any], *, for_erase: bool = False) -> list[float] | None:
+    if for_erase:
+        ink = block.get("originalTextInkBbox") or block.get("textInkBbox")
+    else:
+        ink = block.get("textInkBbox")
+    if ink and len(ink) >= 4:
+        return list(ink)
+    return None
+
+
+def _inset_erase_from_cell_edges(rect: fitz.Rect, block: dict[str, Any]) -> fitz.Rect:
+    """Keep redaction off vertical/horizontal table rules at cell borders."""
+    if not is_table_cell(block):
+        return rect
+    cell = block.get("cellBbox") or block.get("originalBbox") or block.get("bbox") or []
+    if len(cell) < 4:
+        return rect
+    margin = 1.8
+    inner = fitz.Rect(
+        cell[0] + margin,
+        cell[1] + margin,
+        cell[2] - margin,
+        cell[3] - margin,
+    )
+    clipped = rect & inner
+    if clipped.width < 0.25 or clipped.height < 0.25:
+        return fitz.Rect()
+    return clipped
+
+
+def _table_text_placed(
+    page: fitz.Page,
+    bbox: list[float],
+    new_text: str,
+    old_text: str = "",
+) -> bool:
+    """New content in cell and ghost tokens from the pre-edit string are gone."""
+    if len(bbox) < 4:
         return False
-    return any(abs(a - b) > 0.5 for a, b in zip(orig, cur))
+    box_text = (page.get_textbox(fitz.Rect(*bbox)) or "").strip()
+    if not box_text:
+        return False
+    new = (new_text or "").strip()
+    old = (old_text or "").strip()
+    if not new:
+        return False
+    if _residual_old_text_in_bbox(page, bbox, old, new):
+        return False
+    for token in old.split():
+        if len(token) >= 3 and token not in new and token in box_text:
+            return False
+    if new in box_text:
+        return True
+    for part in sorted(new.split(), key=len, reverse=True):
+        if len(part) >= 3 and part in box_text:
+            return True
+    return False
 
 
-def _placement_origin(
-    block: dict[str, Any], bbox_override: list[float] | None = None
-) -> fitz.Point:
-    bbox = bbox_override or _placement_bbox(block)
-    orig = list(block.get("originalBbox") or block.get("bbox") or bbox)
-    origin = block.get("textOrigin") or [orig[0], orig[3]]
-    align = block.get("align", "left")
-    rtl = block.get("direction") == "rtl" or block_needs_unicode_font(block)
+def _table_cell_inner_rect(block: dict[str, Any]) -> fitz.Rect:
+    cell = block.get("cellBbox") or block.get("originalBbox") or block.get("bbox") or []
+    if len(cell) < 4:
+        return fitz.Rect()
+    margin = 1.8
+    return fitz.Rect(
+        cell[0] + margin,
+        cell[1] + margin,
+        cell[2] - margin,
+        cell[3] - margin,
+    )
 
-    if len(bbox) >= 4 and len(orig) >= 4:
-        dx = bbox[0] - orig[0]
-        dy = bbox[3] - orig[3]
-        if rtl and align == "right":
-            return fitz.Point(bbox[2], float(origin[1]) + dy)
-        return fitz.Point(float(origin[0]) + dx, float(origin[1]) + dy)
-    return fitz.Point(bbox[0], bbox[3])
+
+def _table_ink_erase_band(block: dict[str, Any]) -> fitz.Rect | None:
+    """Clear original ink in a tight horizontal band (not full cell width)."""
+    ink = _ink_bbox(block, for_erase=True)
+    if not ink or len(ink) < 4:
+        return None
+    fs = float(block.get("fontSize") or 10)
+    cy = (ink[1] + ink[3]) / 2
+    half = min(max(fs * 0.55, 4.0), (ink[3] - ink[1]) * 0.48)
+    pad_x = min(1.0, (ink[2] - ink[0]) * 0.02)
+    return fitz.Rect(ink[0] + pad_x, cy - half, ink[2] - pad_x, cy + half)
+
+
+def _finalize_erase_rect(
+    page: fitz.Page, rect: fitz.Rect, block: dict[str, Any]
+) -> fitz.Rect | None:
+    tight = _tighten_erase_rect(rect, block)
+    tight = _shrink_erase_from_drawings(page, tight)
+    if tight is None:
+        return None
+    tight = _inset_erase_from_cell_edges(tight, block)
+    if tight.is_empty or tight.width < 0.2 or tight.height < 0.2:
+        return None
+    return tight
+
+
+def _erase_table_cell_rects(
+    page: fitz.Page, block: dict[str, Any], page_blocks: list[dict[str, Any]]
+) -> list[fitz.Rect]:
+    """Erase every original glyph in this cell before re-typing."""
+    block_id = block.get("id")
+    inner = _table_cell_inner_rect(block)
+    search_bbox = list(inner) if not inner.is_empty else list(
+        block.get("originalBbox") or block.get("bbox") or []
+    )
+    erase_block = dict(block)
+    erase_block["textInkBbox"] = (
+        block.get("originalTextInkBbox") or block.get("textInkBbox")
+    )
+    sources: list[fitz.Rect] = list(
+        glyph_rects_for_block(page, erase_block, page_blocks)
+    )
+
+    original = (block.get("originalContent") or block.get("content") or "").strip()
+    if original and len(search_bbox) >= 4:
+        region = fitz.Rect(*search_bbox)
+        for probe in _search_probes(original):
+            for hit in harvest_search_glyph_rects(page, search_bbox, probe):
+                r = hit if isinstance(hit, fitz.Rect) else hit.rect
+                cx, cy = (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2
+                if region.contains(fitz.Point(cx, cy)):
+                    sources.append(r)
+
+    seen: set[tuple[float, float, float, float]] = set()
+    rects: list[fitz.Rect] = []
+    for rect in sources:
+        final = _finalize_erase_rect(page, rect, block)
+        if final is None:
+            continue
+        key = (round(final.x0, 1), round(final.y0, 1), round(final.x1, 1), round(final.y1, 1))
+        if key in seen:
+            continue
+        if _intersects_unmodified_neighbor(final, block_id, page_blocks):
+            continue
+        seen.add(key)
+        rects.append(final)
+
+    band = _table_ink_erase_band(block)
+    if band and not band.is_empty:
+        final = _finalize_erase_rect(page, band, block)
+        if final is not None:
+            key = (round(final.x0, 1), round(final.y0, 1), round(final.x1, 1), round(final.y1, 1))
+            if key not in seen and not _intersects_unmodified_neighbor(
+                final, block_id, page_blocks
+            ):
+                rects.append(final)
+    return rects
+
+
+def _scrub_stray_table_text(
+    page: fitz.Page,
+    block: dict[str, Any],
+    raw: str,
+    fill: tuple[float, float, float],
+) -> None:
+    """Remove duplicate insertions that spilled just outside the cell."""
+    cell = fitz.Rect(*placement_bbox(block))
+    if cell.is_empty:
+        return
+    halo = cell + (-4, -6, 80, 6)
+    touched = False
+    for probe in _search_probes(raw):
+        if len(probe) < 5:
+            continue
+        for hit in page.search_for(probe):
+            r = hit if isinstance(hit, fitz.Rect) else hit.rect
+            cx, cy = (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2
+            if cell.contains(fitz.Point(cx, cy)):
+                continue
+            if not halo.contains(fitz.Point(cx, cy)):
+                continue
+            page.add_redact_annot(r + (-0.5, -0.5, 0.5, 0.5), fill=fill, cross_out=False)
+            touched = True
+    if touched:
+        page.apply_redactions(images=0, graphics=0, text=0)
 
 
 def _tighten_erase_rect(
@@ -142,9 +304,11 @@ def _tighten_erase_rect(
 ) -> fitz.Rect:
     """Narrow tall erase boxes so redaction does not drop whole PDF text runs."""
     if block:
+        if is_table_cell(block):
+            max_height = 7.5
         bb = block.get("originalBbox") or block.get("bbox") or []
         if len(bb) >= 4 and (bb[2] - bb[0]) < 130 and (bb[3] - bb[1]) < 24:
-            max_height = 8.5
+            max_height = min(max_height, 8.5)
     if rect.height <= max_height + 1:
         return rect
     cy = (rect.y0 + rect.y1) / 2
@@ -208,7 +372,9 @@ def _intersects_unmodified_neighbor(
 
 def _line_erase_rect(block: dict[str, Any]) -> fitz.Rect | None:
     """One tight band across the original line — clears residue when per-glyph erase misses."""
-    ref = block.get("originalBbox") or block.get("bbox")
+    if is_table_cell(block):
+        return None
+    ref = _ink_bbox(block) or block.get("originalBbox") or block.get("bbox")
     if not ref or len(ref) < 4:
         return None
     fs = float(block.get("fontSize") or 11)
@@ -227,7 +393,7 @@ def _original_text_still_visible(page: fitz.Page, block: dict[str, Any]) -> bool
     if not box:
         return False
     # Moved box: any leftover paint at the old coordinates is ghost text.
-    if _bbox_moved(block):
+    if bbox_moved(block):
         return True
     if not old:
         return False
@@ -327,14 +493,19 @@ def _erase_search_content(block: dict[str, Any], page_blocks: list[dict[str, Any
 def _erase_rects_for_block(
     page: fitz.Page, block: dict[str, Any], page_blocks: list[dict[str, Any]]
 ) -> list[fitz.Rect]:
+    if is_table_cell(block):
+        return _erase_table_cell_rects(page, block, page_blocks)
+
     rects: list[fitz.Rect] = []
     block_id = block.get("id")
     erase_content = _erase_search_content(block, page_blocks)
     ref_bbox = list(block.get("originalBbox") or block.get("bbox") or [])
 
+    ink = _ink_bbox(block)
+    search_bbox = ink or ref_bbox
     sources: list[fitz.Rect] = list(glyph_rects_for_block(page, block, page_blocks))
-    if erase_content and len(ref_bbox) >= 4:
-        sources.extend(harvest_search_glyph_rects(page, ref_bbox, erase_content))
+    if erase_content and len(search_bbox) >= 4:
+        sources.extend(harvest_search_glyph_rects(page, search_bbox, erase_content))
 
     seen: set[tuple[float, float, float, float]] = set()
     numeric_only = _numeric_only_edit(block)
@@ -354,10 +525,13 @@ def _erase_rects_for_block(
         tight = _shrink_erase_from_drawings(page, tight)
         if tight is None:
             continue
+        tight = _inset_erase_from_cell_edges(tight, block)
+        if tight.is_empty:
+            continue
         if tight.width > 0.2 and tight.height > 0.2:
             rects.append(tight)
 
-    if not numeric_only:
+    if not numeric_only and not is_table_cell(block):
         band = _line_erase_rect(block)
         if band and band.width > 1 and band.height > 1:
             if not _intersects_unmodified_neighbor(band, block_id, page_blocks):
@@ -389,15 +563,7 @@ def _rect_area(rect: fitz.Rect) -> float:
 
 def _export_text(block: dict[str, Any]) -> str:
     """Return text in visual order for PyMuPDF's LTR text engine."""
-    content = (block.get("content") or "").strip()
-    if block_needs_unicode_font(block):
-        try:
-            from bidi.algorithm import get_display
-
-            return get_display(content)
-        except ImportError:
-            pass
-    return content
+    return export_display_text(block)
 
 
 def _search_probes(text: str) -> list[str]:
@@ -445,11 +611,19 @@ def _residual_old_text_in_bbox(
 
 
 def _new_text_placed(
-    page: fitz.Page, bbox: list[float], text: str, *, also_try: str = "", old_text: str = ""
+    page: fitz.Page,
+    bbox: list[float],
+    text: str,
+    *,
+    also_try: str = "",
+    old_text: str = "",
+    block: dict[str, Any] | None = None,
 ) -> bool:
     """True only when the new string is present and old content is not left behind."""
     if len(bbox) < 4:
         return False
+    if block and is_table_cell(block):
+        return _table_text_placed(page, bbox, also_try or text, old_text)
     if _residual_old_text_in_bbox(page, bbox, old_text, also_try or text):
         return False
     region = fitz.Rect(*bbox)
@@ -503,7 +677,7 @@ def _insert_with_textwriter(
         font = fitz.Font(fontfile=path)
         tw = fitz.TextWriter(page.rect)
         tw.append(
-            _placement_origin(block, bbox_override),
+            _placement_point(block, bbox_override),
             content,
             font=font,
             fontsize=float(block.get("fontSize") or 12),
@@ -521,8 +695,13 @@ def _try_insert_textbox(
     fontname: str,
     fontsize: float,
     align: int,
+    *,
+    min_scale: float = 0.72,
 ) -> bool:
-    for scale in (1.0, 0.92, 0.85, 0.78, 0.72):
+    scales = (1.0, 0.92, 0.85, 0.78, 0.72, 0.65, 0.58, 0.52, 0.46, 0.40, 0.35)
+    for scale in scales:
+        if scale < min_scale:
+            break
         fs = max(6.0, fontsize * scale)
         try:
             rc = page.insert_textbox(
@@ -542,6 +721,55 @@ def _try_insert_textbox(
     return False
 
 
+def _insert_table_cell_text(
+    page: fitz.Page,
+    doc: fitz.Document,
+    block: dict[str, Any],
+    content: str,
+    raw: str,
+    original: str,
+) -> bool:
+    """Single measured insert — no retry loops that leave ghost layers on the page."""
+    bbox = placement_bbox(block)
+    if len(bbox) < 4:
+        return False
+    text_rect = fitz.Rect(*table_insert_rect(block))
+    if text_rect.width < 4 or text_rect.height < 3:
+        return False
+    max_fs = float(block.get("fontSize") or 12)
+    align = _ALIGN.get(block.get("align", "left"), fitz.TEXT_ALIGN_LEFT)
+    hebrew_font = _ensure_hebrew_font(page)
+    fill = _redact_fill_for_block(block)
+
+    # One reliable font — avoid multi-font attempts that redact successful ink.
+    font_candidates: list[str] = [hebrew_font]
+
+    for fontname in font_candidates:
+        size = largest_table_font_size(content, text_rect, max_fs, align)
+        try:
+            rc = page.insert_textbox(
+                text_rect,
+                content,
+                fontname=fontname,
+                fontsize=size,
+                color=(0, 0, 0),
+                align=align,
+                fill=None,
+                overlay=True,
+            )
+        except Exception:
+            continue
+        if rc < 0:
+            continue
+        if _table_text_placed(page, bbox, raw, original):
+            _scrub_stray_table_text(page, block, raw, fill)
+            return True
+        page.add_redact_annot(text_rect, fill=fill, cross_out=False)
+        page.apply_redactions(images=0, graphics=0, text=0)
+
+    return False
+
+
 def _insert_text_in_bbox(
     page: fitz.Page,
     doc: fitz.Document,
@@ -552,19 +780,27 @@ def _insert_text_in_bbox(
     if not content:
         return
 
-    bbox = _digit_only_placement_bbox(page, block, page_blocks) or _placement_bbox(block)
+    bbox = _digit_only_placement_bbox(page, block, page_blocks) or placement_bbox(block)
     if len(bbox) < 4:
         return
 
     raw = (block.get("content") or "").strip()
     original = (block.get("originalContent") or "").strip()
     fontsize = float(block.get("fontSize") or 12)
+
+    if is_table_cell(block):
+        if _insert_table_cell_text(page, doc, block, content, raw, original):
+            return
+        logger.warning(
+            "Table cell text not placed for block %s (%r)",
+            block.get("id"),
+            content[:40],
+        )
+        return
+
     text_rect = _clip_insert_rect(fitz.Rect(*bbox), block, page_blocks)
     if text_rect.width < 2 or text_rect.height < 2:
         text_rect = fitz.Rect(*bbox)
-    # Never draw outside the editor box the user sees.
-    editor = fitz.Rect(*bbox)
-    text_rect = text_rect & editor
     align = _ALIGN.get(block.get("align", "left"), fitz.TEXT_ALIGN_LEFT)
     hebrew = block_needs_unicode_font(block)
 
@@ -573,22 +809,28 @@ def _insert_text_in_bbox(
         if not _numeric_only_edit(block) and _try_insert_textbox(
             page, text_rect, content, fontname, fontsize, align
         ):
-            if _new_text_placed(page, bbox, content, also_try=raw, old_text=original):
+            if _new_text_placed(
+                page, bbox, content, also_try=raw, old_text=original, block=block
+            ):
                 return
         try:
             page.insert_text(
-                _placement_origin(block, bbox),
+                _placement_point(block, bbox),
                 content,
                 fontname=fontname,
                 fontsize=fontsize,
                 color=(0, 0, 0),
             )
-            if _new_text_placed(page, bbox, content, also_try=raw, old_text=original):
+            if _new_text_placed(
+                page, bbox, content, also_try=raw, old_text=original, block=block
+            ):
                 return
         except Exception:
             pass
         if _insert_with_textwriter(page, block, content, fontname, bbox):
-            if _new_text_placed(page, bbox, content, also_try=raw, old_text=original):
+            if _new_text_placed(
+                page, bbox, content, also_try=raw, old_text=original, block=block
+            ):
                 return
         logger.warning(
             "Hebrew text not visible after insert for block %s (%r)",
@@ -601,17 +843,21 @@ def _insert_text_in_bbox(
     if not _numeric_only_edit(block) and _try_insert_textbox(
         page, text_rect, content, fontname, fontsize, align
     ):
-        if _new_text_placed(page, bbox, content, also_try=raw, old_text=original):
+        if _new_text_placed(
+            page, bbox, content, also_try=raw, old_text=original, block=block
+        ):
             return
     try:
         page.insert_text(
-            _placement_origin(block, bbox),
+            _placement_point(block, bbox),
             content,
             fontname=fontname,
             fontsize=fontsize,
             color=(0, 0, 0),
         )
-        if _new_text_placed(page, bbox, content, also_try=raw, old_text=original):
+        if _new_text_placed(
+            page, bbox, content, also_try=raw, old_text=original, block=block
+        ):
             return
     except Exception:
         pass
@@ -620,7 +866,9 @@ def _insert_text_in_bbox(
     if fontname != "helv" and _try_insert_textbox(
         page, text_rect, content, "helv", fontsize, align
     ):
-        if _new_text_placed(page, bbox, content, also_try=raw, old_text=original):
+        if _new_text_placed(
+            page, bbox, content, also_try=raw, old_text=original, block=block
+        ):
             return
     logger.warning(
         "Could not place visible text for block %s (%r)",
@@ -739,6 +987,27 @@ def export_pdf_from_model(
                     continue
                 if block.get("id") in surgeon_handled:
                     continue
+                if is_table_cell(block):
+                    if not bbox_moved(block) or not _original_text_still_visible(page, block):
+                        continue
+                    ref = block.get("originalBbox") or block.get("bbox")
+                    if not ref or len(ref) < 4:
+                        continue
+                    for rect in glyph_rects_for_block(page, block, page_blocks):
+                        tight = _tighten_erase_rect(rect, block)
+                        tight = _shrink_erase_from_drawings(page, tight)
+                        if tight is None:
+                            continue
+                        tight = _inset_erase_from_cell_edges(tight, block)
+                        if tight.is_empty or tight.width < 0.2:
+                            continue
+                        page.add_redact_annot(
+                            tight,
+                            fill=_redact_fill_for_block(block),
+                            cross_out=False,
+                        )
+                        touch2 = True
+                    continue
                 if not _original_text_still_visible(page, block):
                     continue
                 if _numeric_only_edit(block):
@@ -747,11 +1016,11 @@ def export_pdf_from_model(
                 if not ref or len(ref) < 4:
                     continue
                 erase_rect = _line_erase_rect(block)
-                if _bbox_moved(block) and erase_rect and not _intersects_unmodified_neighbor(
+                if bbox_moved(block) and erase_rect and not _intersects_unmodified_neighbor(
                     erase_rect, block.get("id"), page_blocks
                 ):
                     pass
-                elif _bbox_moved(block):
+                elif bbox_moved(block):
                     full = fitz.Rect(*ref)
                     if _overlap_foreign_ratio(full, block.get("id"), page_blocks) < 0.12:
                         erase_rect = full
@@ -783,7 +1052,7 @@ def export_pdf_from_model(
                     continue
                 original = (block.get("originalContent") or "").strip()
                 new_text = (block.get("content") or "").strip()
-                if original == new_text and not _bbox_moved(block):
+                if original == new_text and not bbox_moved(block):
                     continue
                 if new_text:
                     _insert_text_in_bbox(page, doc, block, page_blocks)

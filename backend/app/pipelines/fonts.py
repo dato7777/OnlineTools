@@ -77,12 +77,40 @@ def _register_hebrew(page: fitz.Page, cache: dict[str, str], key: str) -> str | 
     return cache[key]
 
 
+def _embed_matching_pdf_font(
+    page: fitz.Page, doc: fitz.Document, pdf_font: str, cache: dict[str, str], key: str
+) -> str | None:
+    if not pdf_font:
+        return None
+    try:
+        for entry in page.get_fonts():
+            xref = entry[0]
+            if not _font_matches(pdf_font, entry):
+                continue
+            font_data = doc.extract_font(xref)
+            if font_data and len(font_data) >= 4 and font_data[3]:
+                label = f"F{xref}"
+                page.insert_font(fontname=label, fontbuffer=font_data[3])
+                cache[key] = label
+                return label
+    except Exception:
+        pass
+    return None
+
+
 def register_document_font(page: fitz.Page, doc: fitz.Document, block: dict[str, Any]) -> str:
     """Return a font name that can render this block's content in the exported PDF."""
     cache: dict[str, str] = getattr(register_document_font, "_cache", {})
     key = _cache_key(page, block)
     if key in cache:
         return cache[key]
+
+    pdf_font = (block.get("pdfFont") or block.get("fontFamily") or "").strip()
+    if block.get("tableGroupId"):
+        embedded = _embed_matching_pdf_font(page, doc, pdf_font, cache, f"{key}:table")
+        if embedded:
+            register_document_font._cache = cache
+            return embedded
 
     # Hebrew / mixed invoices: embedded fon* subsets often omit Latin digits.
     if block_needs_unicode_font(block):
@@ -96,22 +124,11 @@ def register_document_font(page: fitz.Page, doc: fitz.Document, block: dict[str,
         register_document_font._cache = cache
         return "helv"
 
-    pdf_font = (block.get("pdfFont") or block.get("fontFamily") or "").strip()
     if pdf_font:
-        try:
-            for entry in page.get_fonts():
-                xref = entry[0]
-                if not _font_matches(pdf_font, entry):
-                    continue
-                font_data = doc.extract_font(xref)
-                if font_data and len(font_data) >= 4 and font_data[3]:
-                    label = f"F{xref}"
-                    page.insert_font(fontname=label, fontbuffer=font_data[3])
-                    cache[key] = label
-                    register_document_font._cache = cache
-                    return label
-        except Exception:
-            pass
+        embedded = _embed_matching_pdf_font(page, doc, pdf_font, cache, key)
+        if embedded:
+            register_document_font._cache = cache
+            return embedded
 
         for candidate in (pdf_font, pdf_font.split("+")[-1]):
             try:

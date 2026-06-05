@@ -15,6 +15,7 @@ from app.config import settings
 from app.pipelines.background import link_text_to_backgrounds, sample_border_rgb
 from app.pipelines.glyph_quads import resolve_glyph_ownership, stamp_glyph_rects
 from app.pipelines.background_layers import extract_background_blocks
+from app.pipelines.table_cells import merge_blocks_into_table_cells
 from app.storage import file_path, read_file, save_bytes
 
 logger = logging.getLogger(__name__)
@@ -195,6 +196,9 @@ def _split_multiword_blocks(
         if block.get("type") != "text":
             out.append(block)
             continue
+        if block.get("tableGroupId"):
+            out.append(block)
+            continue
         bb = block.get("bbox") or []
         if len(bb) < 4 or (bb[2] - bb[0]) < 28:
             out.append(block)
@@ -235,6 +239,9 @@ def _split_oversized_line_blocks(
     out: list[dict[str, Any]] = []
     for block in blocks:
         if block.get("type") != "text":
+            out.append(block)
+            continue
+        if block.get("tableGroupId"):
             out.append(block)
             continue
         bb = block.get("bbox") or []
@@ -510,6 +517,7 @@ def analyze_pdf(storage_key: str, file_id: str) -> dict[str, Any]:
     native_count = 0
     scanned_without_ocr = 0
     ocr_available = resolve_tesseract_cmd() is not None
+    table_stats_total = {"tablesDetected": 0, "cellsGrouped": 0}
 
     for i in range(len(doc)):
         page = doc[i]
@@ -531,6 +539,9 @@ def analyze_pdf(storage_key: str, file_id: str) -> dict[str, Any]:
         blocks.extend(_extract_image_blocks(page, i, assets_prefix))
         blocks.extend(extract_background_blocks(page, i))
         _append_missing_word_blocks(page, i, blocks)
+        blocks, table_stats = merge_blocks_into_table_cells(page, i, blocks, path)
+        table_stats_total["tablesDetected"] += table_stats.get("tablesDetected", 0)
+        table_stats_total["cellsGrouped"] += table_stats.get("cellsGrouped", 0)
         blocks = _split_multiword_blocks(page, i, blocks)
         blocks = _split_oversized_line_blocks(page, i, blocks)
         blocks = _dedupe_overlapping_text(blocks)
@@ -558,6 +569,8 @@ def analyze_pdf(storage_key: str, file_id: str) -> dict[str, Any]:
             "engine": "pymupdf",
             "tesseractAvailable": ocr_available,
             "scannedPagesWithoutOcr": scanned_without_ocr,
+            "tablesDetected": table_stats_total["tablesDetected"],
+            "tableCellsGrouped": table_stats_total["cellsGrouped"],
             **(
                 {
                     "warning": (
