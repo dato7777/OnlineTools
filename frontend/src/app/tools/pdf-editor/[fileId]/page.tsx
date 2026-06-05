@@ -54,7 +54,8 @@ export default function PdfEditorPage() {
   }, [fileId]);
 
   const activeBlocks = page?.blocks.filter((b) => !b.deleted) ?? [];
-  const maskBlocks = page?.blocks.filter((b) => b.type === "text") ?? [];
+  const maskBlocks =
+    page?.blocks.filter((b) => b.type === "text" || b.type === "image") ?? [];
   const pageForEditor = page ? { ...page, blocks: activeBlocks } : undefined;
   const selectedBlock = activeBlocks.find((b) => b.id === selectedId) ?? null;
 
@@ -311,7 +312,7 @@ export default function PdfEditorPage() {
           }
           onEdit={() => setSheetOpen(true)}
           onDelete={deleteSelected}
-          showEdit={selectedBlock?.type === "text"}
+          showEdit={selectedBlock?.type === "text" || selectedBlock?.type === "image"}
         />
 
         <MobileBlockSheet

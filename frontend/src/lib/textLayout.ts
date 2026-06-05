@@ -55,9 +55,12 @@ export function blockBboxMoved(block: PageBlock): boolean {
 }
 
 export function blockNeedsMask(block: PageBlock, selectedId: string | null): boolean {
+  if (block.deleted) return block.type === "text";
+  if (block.type === "image") {
+    return block.dirty === true || block.id === selectedId || blockBboxMoved(block);
+  }
   if (block.type !== "text") return false;
   if (!hasGlyphMask(block)) return false;
-  if (block.deleted) return true;
   // Mask glyph ink when editing or after edit — destination-out on glyphs only, not grid lines.
   if (block.tableGroupId) return block.dirty === true || block.id === selectedId;
   return block.dirty === true || block.id === selectedId;
@@ -68,7 +71,7 @@ export function blockShowsEditedOverlay(
   selectedId: string | null
 ): boolean {
   if (block.type !== "text" || block.deleted) return false;
-  // Selected block uses the textarea — overlay would duplicate text.
+  // Selected block renders in the editor wrapper — skip duplicate overlay.
   if (block.id === selectedId) return false;
   return block.dirty === true;
 }
@@ -138,14 +141,20 @@ export function exportPreviewLayout(
 export function blockOverlayStyle(
   block: PageBlock,
   renderScale: number,
-  opts?: { border?: boolean }
+  opts?: { border?: boolean; zIndex?: number; fillParent?: boolean }
 ): CSSProperties {
+  const width = Math.max(8, (block.bbox[2] - block.bbox[0]) * renderScale);
+  const height = Math.max(8, (block.bbox[3] - block.bbox[1]) * renderScale);
   return {
     position: "absolute",
-    left: block.bbox[0] * renderScale,
-    top: block.bbox[1] * renderScale,
-    width: Math.max(8, (block.bbox[2] - block.bbox[0]) * renderScale),
-    height: Math.max(8, (block.bbox[3] - block.bbox[1]) * renderScale),
+    ...(opts?.fillParent
+      ? { inset: 0, width: "100%", height: "100%" }
+      : {
+          left: block.bbox[0] * renderScale,
+          top: block.bbox[1] * renderScale,
+          width,
+          height,
+        }),
     fontSize: editorFontSizePx(block, renderScale),
     fontFamily: editorFontFamily(block),
     textAlign: konvaAlign(block),
@@ -157,9 +166,10 @@ export function blockOverlayStyle(
     background: "transparent",
     color: "#18181b",
     border: opts?.border ? "2px solid #0d9488" : "none",
-    overflow: "hidden",
-    whiteSpace: "nowrap",
+    overflow: "visible",
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-word",
     pointerEvents: "none",
-    zIndex: 10,
+    zIndex: opts?.zIndex ?? 10,
   };
 }

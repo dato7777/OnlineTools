@@ -62,8 +62,10 @@ export function EditorCanvasInner({
   const displayH = page.height * renderScale;
 
   const selectedBlock = page.blocks.find(
-    (b) => b.id === selectedId && b.type === "text" && !b.deleted
+    (b) => b.id === selectedId && !b.deleted && (b.type === "text" || b.type === "image")
   );
+  const selectedTextBlock =
+    selectedBlock?.type === "text" ? selectedBlock : null;
 
   const maskBlockIds = useMemo(() => {
     const ids = new Set<string>();
@@ -143,16 +145,20 @@ export function EditorCanvasInner({
       />
       {!bgReady && <div className="absolute inset-0 bg-white" />}
 
-      {page.blocks.map((block) => {
+      {page.blocks.map((block, index) => {
         if (
           block.type !== "text" ||
           block.deleted ||
+          block.id === selectedId ||
           !blockShowsEditedOverlay(block, selectedId)
         ) {
           return null;
         }
         return (
-          <div key={`preview-${block.id}`} style={blockOverlayStyle(block, renderScale)}>
+          <div
+            key={`preview-${block.id}`}
+            style={blockOverlayStyle(block, renderScale, { zIndex: 10 + index })}
+          >
             {block.content}
           </div>
         );
@@ -193,7 +199,11 @@ export function EditorCanvasInner({
               );
             }
 
-            if (block.type !== "text" || editLayer !== "text" || block.deleted) {
+            if (
+              (block.type !== "text" && block.type !== "image") ||
+              editLayer !== "text" ||
+              block.deleted
+            ) {
               return null;
             }
 
@@ -224,7 +234,7 @@ export function EditorCanvasInner({
 
       {selectedBlock && editLayer === "text" && (
         <div
-          className="absolute z-20"
+          className="absolute z-[100]"
           style={{
             left: selectedBlock.bbox[0] * renderScale,
             top: selectedBlock.bbox[1] * renderScale,
@@ -277,25 +287,45 @@ export function EditorCanvasInner({
               }}
             />
           ))}
-          {draggingId !== selectedBlock.id && resizingId !== selectedBlock.id && (
-            <textarea
-              className="h-full w-full resize-none overflow-hidden border-2 border-teal-600 bg-transparent text-black outline-none"
-              style={{
-                fontSize: editorFontSizePx(selectedBlock, renderScale),
-                fontFamily: editorFontFamily(selectedBlock),
-                textAlign: konvaAlign(selectedBlock),
-                direction: textDirection(selectedBlock),
-                lineHeight: 1.15,
-                padding: "1px 2px",
-                margin: 0,
-                boxSizing: "border-box",
-              }}
-              value={selectedBlock.content ?? ""}
-              onChange={(e) =>
-                onBlockChange(selectedBlock.id, { content: e.target.value })
-              }
-              autoFocus
-            />
+          {selectedTextBlock && (
+            <div className="relative h-full w-full">
+              {(draggingId === selectedTextBlock.id ||
+                resizingId === selectedTextBlock.id) && (
+                <div
+                  className="pointer-events-none absolute inset-0 border-2 border-teal-600"
+                  style={blockOverlayStyle(selectedTextBlock, renderScale, {
+                    fillParent: true,
+                    zIndex: 1,
+                  })}
+                >
+                  {selectedTextBlock.content}
+                </div>
+              )}
+              {draggingId !== selectedTextBlock.id &&
+                resizingId !== selectedTextBlock.id && (
+                  <textarea
+                    className="relative z-[2] h-full w-full resize-none overflow-visible border-2 border-teal-600 bg-transparent text-black outline-none"
+                    style={{
+                      fontSize: editorFontSizePx(selectedTextBlock, renderScale),
+                      fontFamily: editorFontFamily(selectedTextBlock),
+                      textAlign: konvaAlign(selectedTextBlock),
+                      direction: textDirection(selectedTextBlock),
+                      lineHeight: 1.15,
+                      padding: "1px 2px",
+                      margin: 0,
+                      boxSizing: "border-box",
+                    }}
+                    value={selectedTextBlock.content ?? ""}
+                    onChange={(e) =>
+                      onBlockChange(selectedTextBlock.id, { content: e.target.value })
+                    }
+                    autoFocus
+                  />
+                )}
+            </div>
+          )}
+          {selectedBlock.type === "image" && (
+            <div className="pointer-events-none h-full w-full border-2 border-dashed border-teal-600 bg-teal-500/10" />
           )}
         </div>
       )}

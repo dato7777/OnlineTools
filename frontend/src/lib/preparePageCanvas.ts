@@ -47,8 +47,22 @@ export function maskTextRegions(
   ctx.save();
   ctx.globalCompositeOperation = "destination-out";
   for (const block of blocks) {
-    if (block.type !== "text" || !maskBlockIds.has(block.id)) continue;
-    if (!hasGlyphMask(block)) continue;
+    if (!maskBlockIds.has(block.id)) continue;
+
+    if (block.type === "image") {
+      const ref = block.originalBbox ?? block.bbox;
+      if (ref.length >= 4) {
+        const pad = 0.08 * renderScale;
+        const x = ref[0] * renderScale - pad;
+        const y = ref[1] * renderScale - pad;
+        const w = (ref[2] - ref[0]) * renderScale + pad * 2;
+        const h = (ref[3] - ref[1]) * renderScale + pad * 2;
+        if (w > 0 && h > 0) ctx.fillRect(x, y, w, h);
+      }
+      continue;
+    }
+
+    if (block.type !== "text" || !hasGlyphMask(block)) continue;
 
     for (const [gx0, gy0, gx1, gy1] of block.glyphRects!) {
       const clipped = clipGlyphToBlock(gx0, gy0, gx1, gy1, block);
