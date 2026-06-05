@@ -1,5 +1,5 @@
 import type { PageBlock } from "@/lib/api";
-import { blockBboxMoved, hasGlyphMask } from "@/lib/textLayout";
+import { blockBboxMoved, blockMaskBbox, hasGlyphMask } from "@/lib/textLayout";
 
 function clipGlyphToBlock(
   x0: number,
@@ -8,7 +8,7 @@ function clipGlyphToBlock(
   y1: number,
   block: PageBlock
 ): [number, number, number, number] | null {
-  const ref = block.originalBbox ?? block.bbox;
+  const ref = blockMaskBbox(block);
   if (ref.length < 4) return [x0, y0, x1, y1];
   const cx = (x0 + x1) / 2;
   const cy = (y0 + y1) / 2;

@@ -44,6 +44,8 @@ def merge_pages_with_originals(
                 merged.setdefault("backgroundRgb", prev.get("backgroundRgb"))
             elif merged.get("type") == "image":
                 merged.setdefault("originalBbox", prev.get("originalBbox", merged.get("bbox", [])))
+            if merged.get("stackOrder") is None and prev.get("stackOrder") is not None:
+                merged["stackOrder"] = prev["stackOrder"]
             if "dirty" not in merged and prev.get("dirty"):
                 merged["dirty"] = prev["dirty"]
             if prev.get("deleted"):

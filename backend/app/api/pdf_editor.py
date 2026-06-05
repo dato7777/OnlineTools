@@ -1,7 +1,8 @@
 import json
+from pathlib import Path
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -17,6 +18,17 @@ from app.storage import file_path, read_file
 from app.worker import run_tool_job
 
 router = APIRouter(prefix="/tools/pdf-editor", tags=["pdf-editor"])
+
+_ASSET_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+    ".bmp": "image/bmp",
+}
 
 
 def _latest_model_artifact(db: Session, file_id: UUID) -> Artifact | None:
@@ -72,6 +84,30 @@ def get_page_preview(
         page_data.get("blocks", []),
     )
     return Response(content=png, media_type="image/png")
+
+
+@router.get("/documents/{file_id}/asset")
+def get_document_asset(
+    file_id: UUID,
+    key: str = Query(..., min_length=1),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Serve extracted PDF images stored under artifacts/{file_id}/."""
+    asset = db.get(FileAsset, file_id)
+    if not asset:
+        raise HTTPException(404, "File not found")
+
+    prefix = f"artifacts/{file_id}/"
+    if ".." in key or not key.startswith(prefix):
+        raise HTTPException(400, "Invalid asset key")
+
+    try:
+        data = read_file(key)
+    except OSError:
+        raise HTTPException(404, "Asset not found")
+
+    mime = _ASSET_MIME.get(Path(key).suffix.lower(), "application/octet-stream")
+    return Response(content=data, media_type=mime)
 
 
 @router.get("/documents/{file_id}/model")

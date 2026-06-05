@@ -52,6 +52,8 @@ export type PageBlock = {
   textOrigin?: [number, number];
   glyphRects?: number[][];
   deleted?: boolean;
+  /** Paint order — higher values render above overlapping blocks. */
+  stackOrder?: number;
   tableGroupId?: string;
   tableRow?: number;
   tableCol?: number;
@@ -146,6 +148,9 @@ export const api = {
     ),
 
   fileDownloadUrl: (fileId: string) => `${API_BASE}/api/v1/files/${fileId}/download`,
+
+  documentAssetUrl: (fileId: string, storageKey: string) =>
+    `${API_BASE}/api/v1/tools/pdf-editor/documents/${fileId}/asset?key=${encodeURIComponent(storageKey)}`,
 };
 
 export function pollJob(jobId: string, onUpdate: (job: Job) => void, intervalMs = 800): () => void {

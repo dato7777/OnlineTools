@@ -16,6 +16,7 @@ import {
 } from "@/lib/api";
 import { usePagePreview } from "@/hooks/usePagePreview";
 import { PDF_RENDER_SCALE, usePdfPage } from "@/hooks/usePdfPage";
+import { ensureBlockStackOrders, nextStackOrder } from "@/lib/blockStack";
 import { cn } from "@/lib/utils";
 
 export default function PdfEditorPage() {
@@ -49,7 +50,15 @@ export default function PdfEditorPage() {
   useEffect(() => {
     api
       .getModel(fileId)
-      .then(setModel)
+      .then((doc) =>
+        setModel({
+          ...doc,
+          pages: doc.pages.map((p) => ({
+            ...p,
+            blocks: ensureBlockStackOrders(p.blocks),
+          })),
+        })
+      )
       .catch((e) => setLoadError(e instanceof Error ? e.message : "Failed to load model"));
   }, [fileId]);
 
@@ -63,35 +72,54 @@ export default function PdfEditorPage() {
     setPreviewRevision((r) => r + 1);
   }, []);
 
+  const handleSelect = useCallback(
+    (id: string | null) => {
+      if (id && model) {
+        const pages = model.pages.map((p) => {
+          if (p.pageIndex !== pageIndex) return p;
+          const stackOrder = nextStackOrder(p.blocks);
+          return {
+            ...p,
+            blocks: p.blocks.map((b) =>
+              b.id === id ? { ...b, stackOrder } : b
+            ),
+          };
+        });
+        setModel({ ...model, pages });
+      }
+      setSelectedId(id);
+    },
+    [model, pageIndex]
+  );
+
   const updateBlock = useCallback(
     (blockId: string, patch: Partial<PageBlock>, userEdit = true) => {
       if (!model) return;
       const prev = model.pages[pageIndex]?.blocks.find((b) => b.id === blockId);
       let merged = patch;
-      if (patch.bbox && prev?.originalBbox?.length === 4) {
+      if (patch.bbox && prev?.textOrigin && prev.originalBbox?.length === 4) {
         const [x0, y0, , y1] = patch.bbox;
-        const [ox0, oy0] = prev.originalBbox;
-        const dx = x0 - ox0;
-        const dy = y0 - oy0;
-        merged = { ...patch };
-        if (prev.textOrigin) {
-          merged.textOrigin = [
-            prev.textOrigin[0] + dx,
-            prev.textOrigin[1] + (y1 - prev.originalBbox[3]),
-          ];
-        }
-        if (prev.textInkBbox?.length === 4) {
-          const [ix0, iy0, ix1, iy1] = prev.textInkBbox;
-          merged.textInkBbox = [ix0 + dx, iy0 + dy, ix1 + dx, iy1 + dy];
-        }
+        const [ox0, , , oy1] = prev.originalBbox;
+        merged = {
+          ...patch,
+          textOrigin: [
+            prev.textOrigin[0] + (x0 - ox0),
+            prev.textOrigin[1] + (y1 - oy1),
+          ],
+        };
       }
       const pages = model.pages.map((p) => {
         if (p.pageIndex !== pageIndex) return p;
+        const stackOrder = userEdit ? nextStackOrder(p.blocks) : undefined;
         return {
           ...p,
           blocks: p.blocks.map((b) =>
             b.id === blockId
-              ? { ...b, ...merged, ...(userEdit ? { dirty: true } : {}) }
+              ? {
+                  ...b,
+                  ...merged,
+                  ...(userEdit ? { dirty: true, stackOrder } : {}),
+                }
               : b
           ),
         };
@@ -231,11 +259,12 @@ export default function PdfEditorPage() {
               page={pageForEditor}
               maskBlocks={maskBlocks}
               pdfCanvas={canvas}
+              fileId={fileId}
               maskText
               editLayer={editLayer}
               renderScale={PDF_RENDER_SCALE}
               selectedId={selectedId}
-              onSelect={setSelectedId}
+              onSelect={handleSelect}
               onBlockChange={updateBlock}
             />
           )}

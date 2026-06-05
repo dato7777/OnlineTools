@@ -3,12 +3,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Stage, Layer, Rect } from "react-konva";
 import type { PageBlock, PageModel } from "@/lib/api";
+import { api } from "@/lib/api";
 import { maskTextRegions } from "@/lib/preparePageCanvas";
 import { applyResize, resizeHandleStyle, type ResizeHandle } from "@/lib/blockResize";
+import { blockStackZIndex, sortBlocksByStack } from "@/lib/blockStack";
 import {
   blockNeedsMask,
   blockOverlayStyle,
   blockShowsEditedOverlay,
+  blockShowsImageOverlay,
   editorFontFamily,
   editorFontSizePx,
   konvaAlign,
@@ -19,6 +22,7 @@ export function EditorCanvasInner({
   page,
   maskBlocks,
   pdfCanvas,
+  fileId,
   renderScale,
   maskText = true,
   editLayer = "text",
@@ -29,6 +33,7 @@ export function EditorCanvasInner({
   page: PageModel;
   maskBlocks: PageBlock[];
   pdfCanvas?: HTMLCanvasElement | null;
+  fileId: string;
   renderScale: number;
   maskText?: boolean;
   editLayer?: "text" | "background";
@@ -60,6 +65,11 @@ export function EditorCanvasInner({
 
   const displayW = page.width * renderScale;
   const displayH = page.height * renderScale;
+
+  const sortedBlocks = useMemo(
+    () => sortBlocksByStack(page.blocks),
+    [page.blocks]
+  );
 
   const selectedBlock = page.blocks.find(
     (b) => b.id === selectedId && !b.deleted && (b.type === "text" || b.type === "image")
@@ -133,6 +143,13 @@ export function EditorCanvasInner({
     };
   }, [onBlockChange, renderScale]);
 
+  const boxW = selectedBlock
+    ? Math.max(8, (selectedBlock.bbox[2] - selectedBlock.bbox[0]) * renderScale)
+    : 0;
+  const boxH = selectedBlock
+    ? Math.max(8, (selectedBlock.bbox[3] - selectedBlock.bbox[1]) * renderScale)
+    : 0;
+
   return (
     <div
       className="relative inline-block overflow-hidden rounded-lg bg-white shadow-xl"
@@ -145,23 +162,44 @@ export function EditorCanvasInner({
       />
       {!bgReady && <div className="absolute inset-0 bg-white" />}
 
-      {page.blocks.map((block, index) => {
-        if (
-          block.type !== "text" ||
-          block.deleted ||
-          block.id === selectedId ||
-          !blockShowsEditedOverlay(block, selectedId)
-        ) {
-          return null;
+      {sortedBlocks.map((block) => {
+        if (block.type === "text" && !block.deleted && blockShowsEditedOverlay(block, selectedId)) {
+          return (
+            <div
+              key={`preview-${block.id}`}
+              style={blockOverlayStyle(block, renderScale, {
+                zIndex: blockStackZIndex(block, selectedId),
+              })}
+            >
+              {block.content}
+            </div>
+          );
         }
-        return (
-          <div
-            key={`preview-${block.id}`}
-            style={blockOverlayStyle(block, renderScale, { zIndex: 10 + index })}
-          >
-            {block.content}
-          </div>
-        );
+        if (
+          block.type === "image" &&
+          !block.deleted &&
+          block.assetId &&
+          blockShowsImageOverlay(block, selectedId)
+        ) {
+          const [x0, y0, x1, y1] = block.bbox;
+          return (
+            <img
+              key={`img-${block.id}`}
+              src={api.documentAssetUrl(fileId, block.assetId)}
+              alt=""
+              draggable={false}
+              className="pointer-events-none absolute object-contain"
+              style={{
+                left: x0 * renderScale,
+                top: y0 * renderScale,
+                width: Math.max(8, (x1 - x0) * renderScale),
+                height: Math.max(8, (y1 - y0) * renderScale),
+                zIndex: blockStackZIndex(block, selectedId),
+              }}
+            />
+          );
+        }
+        return null;
       })}
 
       <Stage
@@ -172,7 +210,7 @@ export function EditorCanvasInner({
         }}
       >
         <Layer>
-          {page.blocks.map((block) => {
+          {sortedBlocks.map((block) => {
             if (block.type === "background") {
               if (editLayer !== "background") return null;
               const [x0, y0, x1, y1] = block.bbox;
@@ -220,7 +258,13 @@ export function EditorCanvasInner({
                 width={Math.max(4, (x1 - x0) * renderScale)}
                 height={Math.max(4, (y1 - y0) * renderScale)}
                 fill="transparent"
-                stroke={selected ? "#0d9488" : isTableCell ? "rgba(13,148,136,0.35)" : "rgba(13,148,136,0.2)"}
+                stroke={
+                  selected
+                    ? "#0d9488"
+                    : isTableCell
+                      ? "rgba(13,148,136,0.5)"
+                      : "rgba(13,148,136,0.4)"
+                }
                 strokeWidth={selected ? 2 : 1}
                 dash={isTableCell && !selected ? [4, 3] : undefined}
                 listening
@@ -234,12 +278,15 @@ export function EditorCanvasInner({
 
       {selectedBlock && editLayer === "text" && (
         <div
-          className="absolute z-[100]"
+          className="absolute overflow-visible"
           style={{
             left: selectedBlock.bbox[0] * renderScale,
             top: selectedBlock.bbox[1] * renderScale,
-            width: Math.max(8, (selectedBlock.bbox[2] - selectedBlock.bbox[0]) * renderScale),
-            height: Math.max(8, (selectedBlock.bbox[3] - selectedBlock.bbox[1]) * renderScale),
+            minWidth: boxW,
+            minHeight: boxH,
+            width: boxW,
+            height: boxH,
+            zIndex: blockStackZIndex(selectedBlock, selectedId),
           }}
         >
           <div
@@ -268,11 +315,7 @@ export function EditorCanvasInner({
               key={handle}
               role="presentation"
               title="Resize box"
-              style={resizeHandleStyle(
-                handle,
-                Math.max(8, (selectedBlock.bbox[2] - selectedBlock.bbox[0]) * renderScale),
-                Math.max(8, (selectedBlock.bbox[3] - selectedBlock.bbox[1]) * renderScale)
-              )}
+              style={resizeHandleStyle(handle, boxW, boxH)}
               onPointerDown={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
@@ -288,15 +331,24 @@ export function EditorCanvasInner({
             />
           ))}
           {selectedTextBlock && (
-            <div className="relative h-full w-full">
+            <div className="relative min-h-full min-w-full overflow-visible">
               {(draggingId === selectedTextBlock.id ||
                 resizingId === selectedTextBlock.id) && (
                 <div
-                  className="pointer-events-none absolute inset-0 border-2 border-teal-600"
-                  style={blockOverlayStyle(selectedTextBlock, renderScale, {
-                    fillParent: true,
-                    zIndex: 1,
-                  })}
+                  className="pointer-events-none absolute left-0 top-0 min-w-full border-2 border-teal-600"
+                  style={{
+                    ...blockOverlayStyle(selectedTextBlock, renderScale, {
+                      fillParent: false,
+                      zIndex: 1,
+                    }),
+                    position: "relative",
+                    left: 0,
+                    top: 0,
+                    width: "max-content",
+                    minWidth: "100%",
+                    height: "auto",
+                    minHeight: "100%",
+                  }}
                 >
                   {selectedTextBlock.content}
                 </div>
@@ -304,7 +356,7 @@ export function EditorCanvasInner({
               {draggingId !== selectedTextBlock.id &&
                 resizingId !== selectedTextBlock.id && (
                   <textarea
-                    className="relative z-[2] h-full w-full resize-none overflow-visible border-2 border-teal-600 bg-transparent text-black outline-none"
+                    className="relative z-[2] min-h-full min-w-full resize-none overflow-visible border-2 border-teal-600 bg-transparent text-zinc-900 outline-none"
                     style={{
                       fontSize: editorFontSizePx(selectedTextBlock, renderScale),
                       fontFamily: editorFontFamily(selectedTextBlock),
@@ -314,6 +366,9 @@ export function EditorCanvasInner({
                       padding: "1px 2px",
                       margin: 0,
                       boxSizing: "border-box",
+                      width: boxW,
+                      minWidth: boxW,
+                      minHeight: boxH,
                     }}
                     value={selectedTextBlock.content ?? ""}
                     onChange={(e) =>
@@ -324,7 +379,15 @@ export function EditorCanvasInner({
                 )}
             </div>
           )}
-          {selectedBlock.type === "image" && (
+          {selectedBlock.type === "image" && selectedBlock.assetId && (
+            <img
+              src={api.documentAssetUrl(fileId, selectedBlock.assetId)}
+              alt=""
+              draggable={false}
+              className="pointer-events-none h-full w-full border-2 border-teal-600 object-contain"
+            />
+          )}
+          {selectedBlock.type === "image" && !selectedBlock.assetId && (
             <div className="pointer-events-none h-full w-full border-2 border-dashed border-teal-600 bg-teal-500/10" />
           )}
         </div>

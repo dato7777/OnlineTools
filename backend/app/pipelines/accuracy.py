@@ -451,7 +451,8 @@ def _ocr_fallback_blocks(page: fitz.Page, page_index: int) -> list[dict[str, Any
 
 
 def _stamp_originals(page: fitz.Page, blocks: list[dict[str, Any]]) -> None:
-    for block in blocks:
+    for i, block in enumerate(blocks):
+        block.setdefault("stackOrder", i)
         if block.get("type") == "text":
             block["originalContent"] = block.get("content", "")
             block["originalBbox"] = list(block.get("bbox", []))

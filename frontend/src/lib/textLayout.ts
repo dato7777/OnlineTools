@@ -1,9 +1,5 @@
 import type { CSSProperties } from "react";
 import type { PageBlock } from "@/lib/api";
-import {
-  localPlacementMetrics,
-  type PlacementMetrics,
-} from "@/lib/exportPlacement";
 
 const HEBREW_RE = /[\u0590-\u05FF]/;
 
@@ -33,9 +29,6 @@ export function konvaAlign(block: PageBlock): "left" | "center" | "right" {
 export function editorFontFamily(block: PageBlock): string {
   const pdf = (block.pdfFont || block.fontFamily || "").toLowerCase();
   if (isHebrewText(block.content ?? "")) {
-    if (pdf.includes("arial") || pdf.includes("david") || pdf.includes("narkis")) {
-      return 'Arial, "Arial Hebrew", "Noto Sans Hebrew", sans-serif';
-    }
     return '"Noto Sans Hebrew", Arial, "Arial Hebrew", sans-serif';
   }
   if (pdf.includes("times")) return '"Times New Roman", Times, serif';
@@ -61,8 +54,6 @@ export function blockNeedsMask(block: PageBlock, selectedId: string | null): boo
   }
   if (block.type !== "text") return false;
   if (!hasGlyphMask(block)) return false;
-  // Mask glyph ink when editing or after edit — destination-out on glyphs only, not grid lines.
-  if (block.tableGroupId) return block.dirty === true || block.id === selectedId;
   return block.dirty === true || block.id === selectedId;
 }
 
@@ -71,71 +62,34 @@ export function blockShowsEditedOverlay(
   selectedId: string | null
 ): boolean {
   if (block.type !== "text" || block.deleted) return false;
-  // Selected block renders in the editor wrapper — skip duplicate overlay.
   if (block.id === selectedId) return false;
   return block.dirty === true;
 }
 
-export function editorFontSizePx(block: PageBlock, renderScale: number): number {
-  return Math.max(8, (block.fontSize ?? 12) * renderScale);
+export function blockShowsImageOverlay(
+  block: PageBlock,
+  selectedId: string | null
+): boolean {
+  if (block.type !== "image" || block.deleted) return false;
+  if (block.id === selectedId) return false;
+  return block.dirty === true || blockBboxMoved(block);
 }
 
-export type ExportPreviewLayout = {
-  container: CSSProperties;
-  inner: CSSProperties;
-  text: CSSProperties;
-};
+/** Union of original and current bbox — keeps masks aligned after resize/move. */
+export function blockMaskBbox(block: PageBlock): number[] {
+  const cur = block.bbox;
+  const orig = block.originalBbox ?? block.bbox;
+  if (cur.length < 4 || orig.length < 4) return cur.length >= 4 ? cur : orig;
+  return [
+    Math.min(cur[0], orig[0]),
+    Math.min(cur[1], orig[1]),
+    Math.max(cur[2], orig[2]),
+    Math.max(cur[3], orig[3]),
+  ];
+}
 
-export function exportPreviewLayout(
-  block: PageBlock,
-  renderScale: number,
-  metrics?: PlacementMetrics | null
-): ExportPreviewLayout {
-  const m = metrics ?? localPlacementMetrics(block);
-  const [x0, y0, x1, y1] = block.bbox;
-  const [ix0, iy0, ix1, iy1] = m.insertRect;
-  const fontPx = Math.max(6, m.exportFontSize * renderScale);
-
-  const container: CSSProperties = {
-    position: "absolute",
-    left: x0 * renderScale,
-    top: y0 * renderScale,
-    width: Math.max(8, (x1 - x0) * renderScale),
-    height: Math.max(8, (y1 - y0) * renderScale),
-    pointerEvents: "none",
-    zIndex: 10,
-  };
-
-  const flexAlign =
-    m.align === "center" ? "center" : m.align === "right" ? "flex-end" : "flex-start";
-
-  const inner: CSSProperties = {
-    position: "absolute",
-    left: (ix0 - x0) * renderScale,
-    top: (iy0 - y0) * renderScale,
-    width: Math.max(4, (ix1 - ix0) * renderScale),
-    height: Math.max(4, (iy1 - iy0) * renderScale),
-    display: "flex",
-    alignItems: "center",
-    justifyContent: flexAlign,
-    overflow: "hidden",
-    boxSizing: "border-box",
-  };
-
-  const text: CSSProperties = {
-    fontSize: fontPx,
-    fontFamily: editorFontFamily(block),
-    textAlign: m.align,
-    direction: textDirection(block),
-    lineHeight: 1,
-    padding: 0,
-    margin: 0,
-    whiteSpace: "nowrap",
-    color: "#18181b",
-    background: "transparent",
-  };
-
-  return { container, inner, text };
+export function editorFontSizePx(block: PageBlock, renderScale: number): number {
+  return Math.max(8, (block.fontSize ?? 12) * renderScale);
 }
 
 export function blockOverlayStyle(

@@ -7,6 +7,7 @@ export function EditorCanvas(props: {
   page: PageModel;
   maskBlocks: PageBlock[];
   pdfCanvas?: HTMLCanvasElement | null;
+  fileId: string;
   renderScale: number;
   maskText?: boolean;
   editLayer?: "text" | "background";
