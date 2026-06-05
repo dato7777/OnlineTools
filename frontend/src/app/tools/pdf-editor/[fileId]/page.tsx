@@ -67,16 +67,22 @@ export default function PdfEditorPage() {
       if (!model) return;
       const prev = model.pages[pageIndex]?.blocks.find((b) => b.id === blockId);
       let merged = patch;
-      if (patch.bbox && prev?.textOrigin && prev.originalBbox?.length === 4) {
+      if (patch.bbox && prev?.originalBbox?.length === 4) {
         const [x0, y0, , y1] = patch.bbox;
-        const [ox0, , , oy1] = prev.originalBbox;
-        merged = {
-          ...patch,
-          textOrigin: [
-            prev.textOrigin[0] + (x0 - ox0),
-            prev.textOrigin[1] + (y1 - oy1),
-          ],
-        };
+        const [ox0, oy0] = prev.originalBbox;
+        const dx = x0 - ox0;
+        const dy = y0 - oy0;
+        merged = { ...patch };
+        if (prev.textOrigin) {
+          merged.textOrigin = [
+            prev.textOrigin[0] + dx,
+            prev.textOrigin[1] + (y1 - prev.originalBbox[3]),
+          ];
+        }
+        if (prev.textInkBbox?.length === 4) {
+          const [ix0, iy0, ix1, iy1] = prev.textInkBbox;
+          merged.textInkBbox = [ix0 + dx, iy0 + dy, ix1 + dx, iy1 + dy];
+        }
       }
       const pages = model.pages.map((p) => {
         if (p.pageIndex !== pageIndex) return p;

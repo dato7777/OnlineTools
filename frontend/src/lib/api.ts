@@ -52,6 +52,14 @@ export type PageBlock = {
   textOrigin?: [number, number];
   glyphRects?: number[][];
   deleted?: boolean;
+  tableGroupId?: string;
+  tableRow?: number;
+  tableCol?: number;
+  cellBbox?: number[];
+  /** Tight bounds of actual text ink inside a table cell (not the full grid cell). */
+  textInkBbox?: number[];
+  /** Ink bounds at analyze time — used to erase original glyphs after drag. */
+  originalTextInkBbox?: number[];
 };
 
 export type PageModel = {
@@ -68,6 +76,15 @@ export type BlockDocument = {
   pages: PageModel[];
   nativePageRatio?: number;
   diagnostics?: Record<string, unknown>;
+};
+
+export type PlacementMetrics = {
+  insertRect: number[];
+  exportFontSize: number;
+  align: "left" | "center" | "right";
+  useTextOrigin: boolean;
+  textOrigin: [number, number] | null;
+  isTableCell: boolean;
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -111,6 +128,12 @@ export const api = {
     request<BlockDocument>(`/tools/pdf-editor/documents/${fileId}/model`, {
       method: "PATCH",
       body: JSON.stringify({ pages }),
+    }),
+
+  placementMetrics: (block: PageBlock) =>
+    request<PlacementMetrics>("/tools/pdf-editor/placement-metrics", {
+      method: "POST",
+      body: JSON.stringify({ block }),
     }),
 
   exportPdf: (fileId: string, model?: BlockDocument) =>

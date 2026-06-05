@@ -199,6 +199,7 @@ export function EditorCanvasInner({
 
             const [x0, y0, x1, y1] = block.bbox;
             const selected = selectedId === block.id;
+            const isTableCell = Boolean(block.tableGroupId);
 
             return (
               <Rect
@@ -209,8 +210,9 @@ export function EditorCanvasInner({
                 width={Math.max(4, (x1 - x0) * renderScale)}
                 height={Math.max(4, (y1 - y0) * renderScale)}
                 fill="transparent"
-                stroke={selected ? "#0d9488" : "rgba(13,148,136,0.2)"}
+                stroke={selected ? "#0d9488" : isTableCell ? "rgba(13,148,136,0.35)" : "rgba(13,148,136,0.2)"}
                 strokeWidth={selected ? 2 : 1}
+                dash={isTableCell && !selected ? [4, 3] : undefined}
                 listening
                 onClick={() => onSelect(block.id)}
                 onTap={() => onSelect(block.id)}
@@ -277,7 +279,7 @@ export function EditorCanvasInner({
           ))}
           {draggingId !== selectedBlock.id && resizingId !== selectedBlock.id && (
             <textarea
-              className="h-full w-full resize-none overflow-hidden border-2 border-teal-600 bg-transparent text-zinc-900 outline-none"
+              className="h-full w-full resize-none overflow-hidden border-2 border-teal-600 bg-transparent text-black outline-none"
               style={{
                 fontSize: editorFontSizePx(selectedBlock, renderScale),
                 fontFamily: editorFontFamily(selectedBlock),
